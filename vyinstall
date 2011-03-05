@@ -13,6 +13,9 @@ OPENSSL_CRL_FILE="${OPENSSL_DIR}/crl.pem"
 OPENSSL_PRIVATE_DIR="${OPENSSL_DIR}/private"
 OPENSSL_KEY_FILE="${OPENSSL_PRIVATE_DIR}/device.key"
 
+DEFAULT_CONFIG_FILE="/opt/vyatta/etc/config/config.boot.default"
+
+source /etc/default/vyatta
 source /etc/default/vyinstall
 
 function suicide() {
@@ -28,7 +31,16 @@ function suicide_if_ne() {
   VAL1=${1}; shift
   VAL2=${1}; shift
   if [ ${VAL1} -ne ${VAL2} ]; then
-    suicide "${@}" 
+    suicide "${@}"
+  fi
+}
+
+function suicide_if_not_in_range() {
+  ACT_VAL=${1}; shift
+  MIN_VAL=${1}; shift
+  MAX_VAL=${1}; shift
+  if [ ${ACT_VAL} -lt ${MIN_VAL} ] || [ ${ACT_VAL} -gt ${MAX_VAL} ]; then
+    suicide "${@}"
   fi
 }
 
@@ -41,6 +53,12 @@ function show_help() {
   echo "            openssl-ca"
   echo "            openssl-crl"
   echo "            ssh-keyring <keyring> [<user>]"
+  echo ""
+  echo "            default-config [--load]"
+  echo "            config-partial <partial>"
+  echo "            var-spool <partition>"
+  echo ""
+  echo "More information: http://www.vyatta4people.org/vyinstall/"
 }
 
 function install_remote_file() {
@@ -67,7 +85,7 @@ function install_remote_file() {
   else
     FILES_ARE_THE_SAME="no"
   fi
-  if [ "${FILES_ARE_THE_SAME}" == "no" ]; then
+  if [ "${FILES_ARE_THE_SAME}" = "no" ]; then
     if [ -f "${LOCAL_FILE}" ]; then
       cp -p "${LOCAL_FILE}" "${LOCAL_FILE}.${DATETIME}.${SID}"
       suicide_if_ne ${?} 0 "Failed to backup file: ${LOCAL_FILE}"
@@ -141,6 +159,95 @@ function install_ssh_keyring() {
   rm "${TMP_SSH_KEYRING_FILE}"
 }
 
+function install_default_config() {
+  LOAD_CONFIG="no"
+  if [ ${#1} -gt 0 ]; then
+    if [ "${1}" = "--load" ]; then
+      LOAD_CONFIG="yes"
+    else
+      suicide "Unknown option: ${1}"
+    fi
+  fi
+  if [ -f "${DEFAULT_CONFIG_FILE}" ]; then
+    cp -p "${CONFIG_FILE}" "${CONFIG_FILE}.${DATETIME}.${SID}"
+    cp -p "${DEFAULT_CONFIG_FILE}" "${CONFIG_FILE}"
+    if [ "${LOAD_CONFIG}" = "yes" ]; then
+      /opt/vyatta/sbin/vyatta-cfg-cmd-wrapper begin >/dev/null
+      /opt/vyatta/sbin/vyatta-cfg-cmd-wrapper load >/dev/null
+      /opt/vyatta/sbin/vyatta-cfg-cmd-wrapper end >/dev/null
+    else
+      echo "* Default config installed, but NOT loaded!"
+      echo "NB! You need to load it manually from configuration mode or reboot system."
+    fi
+  else
+    suicide "Default config file not found: ${DEFAULT_CONFIG_FILE}"
+  fi
+}
+
+function install_config_partial() {
+  CONFIG_PARTIAL="${1}"
+  TMP_CONFIG_PARTIAL_FILE="/tmp/nodelete.vyinstall.partial.${SID}.${RANDOM}"
+  install_remote_file "config-partials/${CONFIG_PARTIAL}.partial" "${TMP_CONFIG_PARTIAL_FILE}" root:vyattacfg 0660 >/dev/null
+  sudo -u "${SUDO_USER}" /opt/vyatta/sbin/vyatta-cfg-cmd-wrapper begin >/dev/null
+  sudo -u "${SUDO_USER}" /opt/vyatta/sbin/vyatta-cfg-cmd-wrapper load "${TMP_CONFIG_PARTIAL_FILE}" --merge >/dev/null
+  if [ ${?} -eq 0 ]; then
+    echo "* Partial successfully loaded, but modified configuration was NOT saved!"
+    echo "NB! You need to enter configuration mode, review changes and save it manually!"
+    rm "${TMP_CONFIG_PARTIAL_FILE}"
+    sudo -u "${SUDO_USER}" /opt/vyatta/sbin/vyatta-cfg-cmd-wrapper end >/dev/null
+  else
+    sudo -u "${SUDO_USER}" /opt/vyatta/sbin/vyatta-cfg-cmd-wrapper end >/dev/null
+    suicide "Can not load config partial: ${TMP_CONFIG_PARTIAL_FILE}"
+  fi
+}
+
+function move_path_to_partition() {
+  SRC_PATH="${1}"
+  DST_PARTITION="${2}"
+  VOLUME_LABEL="${SRC_PATH}"
+  TMP_MOUNT_POINT="/mnt/_vyinstall_${RANDOM}"
+
+  if [ -z $(echo "${DST_PARTITION}" | egrep "^/dev/[shv]d[a-z][1-9]{1,2}$") ]; then
+    suicide "Not sane partition device: ${DST_PARTITION}"
+  fi
+
+  if [ $(mount | awk '{print $1}' | egrep "^${DST_PARTITION}$" | wc -l) -ne 0 ]; then
+    suicide "Device already mounted: ${DST_PARTITION}"
+  fi
+
+  DST_DISK="$(echo "${DST_PARTITION}" | sed 's/[0-9]*$//')"
+  DST_PARTITION_NUMBER="$(echo "${DST_PARTITION}" | sed 's/^[\/a-z]*//')"
+  DST_PARTITION_COUNT="$(fdisk -l "${DST_DISK}" | egrep "^/dev/" | wc -l)"
+  if [ ${DST_PARTITION_COUNT} -eq 1 ]; then
+    FDISK_COMMAND="t\n83\nw\n"
+  else
+    FDISK_COMMAND="t\n${DST_PARTITION_NUMBER}\n83\nw\n"
+  fi
+  echo -e "${FDISK_COMMAND}" | fdisk "${DST_DISK}" >/dev/null
+
+  mkfs.ext3 -q -L "${VOLUME_LABEL}" "${DST_PARTITION}"
+  suicide_if_ne ${?} 0 "Formatting of partition failed: ${DST_PARTITION}"
+
+  sudo mkdir "${TMP_MOUNT_POINT}"
+  sudo mount "${DST_PARTITION}" "${TMP_MOUNT_POINT}"
+  suicide_if_ne ${?} 0 "Mount of temporary mount point failed: ${TMP_MOUNT_POINT}"
+
+  sudo rsync -aH "${SRC_PATH}/" "${TMP_MOUNT_POINT}/"
+  suicide_if_ne ${?} 0 "RSync to temporary mount point failed: ${TMP_MOUNT_POINT}"
+
+  sudo umount "${TMP_MOUNT_POINT}"
+  suicide_if_ne ${?} 0 "Unmount of temporary mount point failed: ${TMP_MOUNT_POINT}"
+  rmdir "${TMP_MOUNT_POINT}"
+
+  echo "* Moved ${SRC_PATH} content to ${DST_PARTITION}"
+  if [ $(egrep "^\#LABEL=${VOLUME_LABEL}" /etc/fstab | wc -l ) -eq 1 ]; then
+    echo "sed -i 's\^#LABEL=${VOLUME_LABEL}\LABEL=${VOLUME_LABEL}\' /etc/fstab" | bash
+  else
+    echo "NB! You need to edit /etc/fstab manually!"
+  fi
+  echo "NB! It will be used ONLY after reboot!"
+}
+
 if [ ${UID} -ne 0 ]; then
   suicide "vyInstall must be launched from root!"
 fi
@@ -156,16 +263,29 @@ case ${1} in
     suicide_if_ne ${#} 3 "Option '${1}' takes 2 arguments: <host_name> <password>"
     install_openssl_keypair ${2} ${3};;
   'openssl-ca')
-    suicide_if_ne ${#} 1 "Option '${1}' takes no arguments" 
+    suicide_if_ne ${#} 1 "Option '${1}' takes no arguments"
     install_openssl_ca;;
   'openssl-crl')
     suicide_if_ne ${#} 1 "Option '${1}' takes no arguments"
     install_openssl_crl;;
   'ssh-keyring')
-    if [ ${#} -lt 2 ] || [ ${#} -gt 3 ]; then
-      suicide "Option '${1}' takes 1 or 2 arguments: <keyring> [<user>]"
-    fi
+    suicide_if_not_in_range ${#} 2 3 "Option '${1}' takes 1 or 2 arguments: <keyring> [<user>]"
     install_ssh_keyring ${2} ${3} ${4};;
+  'default-config')
+    suicide_if_not_in_range ${#} 1 2 "Option '${1}' takes no or just 1 argument: [--load]"
+    install_default_config ${2};;
+  'config-partial')
+    suicide_if_ne ${#} 2 "Option '${1}' takes 1 argument: <partial>"
+    install_config_partial ${2};;
+  'var-spool')
+    suicide_if_ne ${#} 2 "Option '${1}' takes 1 argument: <partition>"
+    move_path_to_partition "/var/spool" ${2};;
+  'install-remote-file')
+    suicide_if_not_in_range ${#} 5 6 "Option '${1}' takes 4 or 5 arguments: <remote_file> <local_file> <local_file_owner> <local_file_mode> [<remote_file_password>]"
+    install_remote_file ${2} ${3} ${4} ${5} ${6};;
+ 'move-path-to-partition')
+    suicide_if_ne ${#} 3 "Option '${1}' takes 2 arguments: <path> <partition>"
+    move_path_to_partition ${2} ${3};;
   'show-help'|'--help')
     show_help;;
   *)
