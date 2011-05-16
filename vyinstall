@@ -13,6 +13,8 @@ OPENSSL_CRL_FILE="${OPENSSL_DIR}/crl.pem"
 OPENSSL_PRIVATE_DIR="${OPENSSL_DIR}/private"
 OPENSSL_KEY_FILE="${OPENSSL_PRIVATE_DIR}/device.key"
 
+EXCLUDE_CONFIG_SETS_REGEX="^set interfaces ethernet eth[0-9]{1,4} (duplex|hw-id|smp_affinity|speed) "
+
 DEFAULT_CONFIG_FILE="/opt/vyatta/etc/config/config.boot.default"
 
 source /etc/default/vyatta
@@ -73,9 +75,13 @@ function suicide_if_not_in_range() {
 function suicide_if_running_config_differs_from_saved() {
   TMP_CONFIG_FILE="/tmp/vyinstall.config.boot.${SID}.${RANDOM}"
   save_config "${TMP_CONFIG_FILE}"
-  diff -q "${TMP_CONFIG_FILE}" "${CONFIG_FILE}" >/dev/null
+  TMP_CONFIG_SETS_FILE_A="/tmp/vyinstall.config.sets.a.${SID}.${RANDOM}"
+  TMP_CONFIG_SETS_FILE_B="/tmp/vyinstall.config.sets.b.${SID}.${RANDOM}"
+  /opt/vyatta/sbin/vyatta-config-gen-sets.pl "${CONFIG_FILE}" | egrep -v "${EXCLUDE_CONFIG_SETS_REGEX}" >"${TMP_CONFIG_SETS_FILE_A}"
+  /opt/vyatta/sbin/vyatta-config-gen-sets.pl "${TMP_CONFIG_FILE}" | egrep -v "${EXCLUDE_CONFIG_SETS_REGEX}" >"${TMP_CONFIG_SETS_FILE_B}"
+  diff -q "${TMP_CONFIG_SETS_FILE_A}" "${TMP_CONFIG_SETS_FILE_B}" >/dev/null
   suicide_if_ne ${?} 0 "Running config differs from saved."
-  rm "${TMP_CONFIG_FILE}"
+  rm "${TMP_CONFIG_FILE}" "${TMP_CONFIG_SETS_FILE_A}" "${TMP_CONFIG_SETS_FILE_B}"
 }
 
 function show_help() {
