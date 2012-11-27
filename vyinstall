@@ -4,8 +4,13 @@
 #
 SID=${RANDOM}
 DATETIME="$(date +%Y%m%d%H%M%S)"
-DATA_ROOT="/var/cache/vyinstall"
-CONFIG_FILE="/opt/vyatta/etc/config/config.boot"
+
+if [ -d "/config/auth" ]; then
+  DATA_ROOT="/config/auth/vyinstall"
+else
+  DATA_ROOT="/var/cache/vyinstall"
+fi
+
 OPENSSL_DIR="${DATA_ROOT}/openssl"
 OPENSSL_CA_CRT_FILE="${OPENSSL_DIR}/CA.crt"
 OPENSSL_CRT_FILE="${OPENSSL_DIR}/device.crt"
@@ -13,9 +18,9 @@ OPENSSL_CRL_FILE="${OPENSSL_DIR}/crl.pem"
 OPENSSL_PRIVATE_DIR="${OPENSSL_DIR}/private"
 OPENSSL_KEY_FILE="${OPENSSL_PRIVATE_DIR}/device.key"
 
-EXCLUDE_CONFIG_SETS_REGEX="^set interfaces ethernet eth[0-9]{1,4} (duplex|hw-id|smp_affinity|speed) "
-
+CONFIG_FILE="/opt/vyatta/etc/config/config.boot"
 DEFAULT_CONFIG_FILE="/opt/vyatta/etc/config/config.boot.default"
+EXCLUDE_CONFIG_SETS_REGEX="^set interfaces ethernet eth[0-9]{1,4} (duplex|hw-id|smp_affinity|speed) "
 
 source /etc/default/vyatta
 source /etc/default/vyinstall
@@ -321,6 +326,10 @@ function move_path_to_partition() {
 if [ ${UID} -ne 0 ]; then
   suicide "vyInstall must be launched from root!"
 fi
+
+test -d "${DATA_ROOT}" || mkdir "${DATA_ROOT}"
+test -d "${OPENSSL_DIR}" || mkdir "${OPENSSL_DIR}"
+test -d "${OPENSSL_PRIVATE_DIR}" || mkdir "${OPENSSL_PRIVATE_DIR}"
 
 case ${1} in
   'cleanup-all')
